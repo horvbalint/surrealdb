@@ -41,7 +41,7 @@ Host functions in `host.rs` read `StoreData.context` and delegate to the current
 
 - `allow_functions`: `FunctionTargets` enum — `None` (deny all), `All`, or `Some(patterns)`.
 - `run()` checks `config.capabilities.allow_functions.allows(fnc)` before executing.
-- `allow_arbitrary_queries` for `sql()`; `allow_net` for WASI networking.
+- `allow_arbitrary_queries` for `sql()`; `allow_net` (`NetTargets` enum, same `None`/`All`/`Some` shape) for WASI networking. `resolve_allow_net` turns it into a `ResolvedAllowNet` at load time; `All` (`["*"]` in config) permits any *public* address — the private-IP guard (loopback, RFC1918, link-local, cloud metadata) stays enforced in `wasi_context::build` even under a wildcard.
 
 ## KV Semantics
 
@@ -74,8 +74,9 @@ Modules choose via `strict_timeout` in `surrealism.toml` (default `true` → gua
 | `host.rs` | `InvocationContext`, `NullContext`, `implement_host_functions` |
 | `epoch.rs` | Two shared engines (fast + guarded), `shared_engine(guarded)`, epoch ticker |
 | `kv.rs` | `BTreeMapStore`, `KVStore` trait |
-| `capabilities.rs` | `SurrealismCapabilities`, `FunctionTargets` |
+| `capabilities.rs` | `SurrealismCapabilities`, `FunctionTargets`, `NetTargets` |
 | `config.rs` | `SurrealismConfig`, `AbiVersion` |
 | `package.rs` | `SurrealismPackage`, pack/unpack `.surli` |
 | `exports.rs` | `ExportsManifest`, `FunctionExport` |
+| `net_allow.rs` | Resolve `NetTargets` → `ResolvedAllowNet` at load time (DNS, private-IP check) |
 | `wasi_context.rs` | Build WASI ctx for preopened dirs, networking |

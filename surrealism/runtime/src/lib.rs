@@ -16,7 +16,7 @@ pub mod runtime;
 pub mod store;
 mod wasi_context;
 
-pub use net_allow::{ResolvedNetAllow, resolve_allow_net};
+pub use net_allow::{ResolvedAllowNet, ResolvedNetAllow, resolve_allow_net};
 pub use surrealism_types::err::{PrefixErr, SurrealismError};
 
 /// The version of the Surrealism SDK that this runtime was compiled against.

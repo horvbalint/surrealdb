@@ -1007,7 +1007,7 @@ impl Capabilities {
 		&self,
 		capabilities: &SurrealismCapabilities,
 	) -> anyhow::Result<()> {
-		use surrealism_runtime::capabilities::FunctionTargets;
+		use surrealism_runtime::capabilities::{FunctionTargets, NetTargets};
 
 		if capabilities.allow_scripting && !self.allows_scripting() {
 			bail!("Surrealism package requires scripting, but it is not allowed");
@@ -1041,14 +1041,24 @@ impl Capabilities {
 			}
 		}
 
-		if !capabilities.allow_net.is_empty() {
-			for net in capabilities.allow_net.iter() {
-				let target = NetTarget::from_str(net)?;
-				if !self.allows_network_target(&target) {
+		match &capabilities.allow_net {
+			NetTargets::None => {}
+			NetTargets::All => {
+				if !matches!(self.allow_net, Targets::All) {
 					bail!(
-						"Surrealism package requires network target '{}', but it is not allowed",
-						net
+						"Surrealism package requires access to all network targets, but the server does not allow all network targets"
 					);
+				}
+			}
+			NetTargets::Some(entries) => {
+				for net in entries {
+					let target = NetTarget::from_str(net)?;
+					if !self.allows_network_target(&target) {
+						bail!(
+							"Surrealism package requires network target '{}', but it is not allowed",
+							net
+						);
+					}
 				}
 			}
 		}
@@ -1671,6 +1681,70 @@ mod tests {
 				.without_eval_query(Targets::<EvalQueryTarget>::from(EvalQueryTarget::Record));
 			assert!(caps.allows_eval_query(&EvalQueryTarget::System));
 			assert!(!caps.allows_eval_query(&EvalQueryTarget::Record));
+		}
+	}
+
+	#[cfg(feature = "surrealism")]
+	#[test]
+	fn test_validate_surrealism_capabilities_net() {
+		use surrealism_runtime::capabilities::{NetTargets, SurrealismCapabilities};
+
+		fn with_net(net: NetTargets) -> SurrealismCapabilities {
+			SurrealismCapabilities {
+				allow_net: net,
+				..Default::default()
+			}
+		}
+
+		// Module `*` + server allows all -> ok.
+		{
+			let server = Capabilities::default().with_network_targets(Targets::<NetTarget>::All);
+			server.validate_surrealism_capabilities(&with_net(NetTargets::All)).unwrap();
+		}
+
+		// Module `*` + server allows only specific targets -> rejected: `*`
+		// can never be a subset of a restricted allowlist.
+		{
+			let server = Capabilities::default().with_network_targets(Targets::<NetTarget>::Some(
+				[NetTarget::from_str("example.com").unwrap()].into(),
+			));
+			server.validate_surrealism_capabilities(&with_net(NetTargets::All)).unwrap_err();
+		}
+
+		// Module `*` + server denies all networking -> rejected.
+		{
+			let server = Capabilities::default();
+			server.validate_surrealism_capabilities(&with_net(NetTargets::All)).unwrap_err();
+		}
+
+		// Module lists a specific target the server allows -> ok.
+		{
+			let server = Capabilities::default().with_network_targets(Targets::<NetTarget>::Some(
+				[NetTarget::from_str("example.com").unwrap()].into(),
+			));
+			server
+				.validate_surrealism_capabilities(&with_net(NetTargets::Some(vec![
+					"example.com".into(),
+				])))
+				.unwrap();
+		}
+
+		// Module lists a specific target the server does not allow -> rejected.
+		{
+			let server = Capabilities::default().with_network_targets(Targets::<NetTarget>::Some(
+				[NetTarget::from_str("example.com").unwrap()].into(),
+			));
+			server
+				.validate_surrealism_capabilities(&with_net(NetTargets::Some(vec![
+					"other.com".into(),
+				])))
+				.unwrap_err();
+		}
+
+		// Module declares no networking -> always ok, regardless of server config.
+		{
+			let server = Capabilities::default();
+			server.validate_surrealism_capabilities(&with_net(NetTargets::None)).unwrap();
 		}
 	}
 }

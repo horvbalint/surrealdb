@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::{Result, bail};
 use async_trait::async_trait;
 use reblessive::TreeStack;
-use surrealism_runtime::capabilities::{FunctionTargets, SurrealismCapabilities};
+use surrealism_runtime::capabilities::{FunctionTargets, NetTargets, SurrealismCapabilities};
 use surrealism_runtime::config::SurrealismConfig;
 use surrealism_runtime::host::InvocationContext;
 use surrealism_runtime::kv::{BTreeMapStore, KVStore};
@@ -76,23 +76,34 @@ impl Host {
 	}
 }
 
-/// Parse the module's `allow_net` entries as [`NetTarget`] (same strings as in config).
-pub(crate) fn module_allow_net_targets(module: &SurrealismCapabilities) -> HashSet<NetTarget> {
-	module
-		.allow_net
-		.iter()
-		.filter_map(|n| match NetTarget::from_str(n) {
-			Ok(t) => Some(t),
-			Err(e) => {
-				tracing::warn!(
-					pattern = %n,
-					error = %e,
-					"Ignoring unparseable network target pattern"
-				);
-				None
+/// Parse the module's `allow_net` declaration as [`Targets<NetTarget>`] (same
+/// strings/`"*"` semantics as in config).
+pub(crate) fn module_net_targets(module: &SurrealismCapabilities) -> Targets<NetTarget> {
+	match &module.allow_net {
+		NetTargets::None => Targets::None,
+		NetTargets::All => Targets::All,
+		NetTargets::Some(entries) => {
+			let targets: HashSet<NetTarget> = entries
+				.iter()
+				.filter_map(|n| match NetTarget::from_str(n) {
+					Ok(t) => Some(t),
+					Err(e) => {
+						tracing::warn!(
+							pattern = %n,
+							error = %e,
+							"Ignoring unparseable network target pattern"
+						);
+						None
+					}
+				})
+				.collect();
+			if targets.is_empty() {
+				Targets::None
+			} else {
+				Targets::Some(targets)
 			}
-		})
-		.collect()
+		}
+	}
 }
 
 /// Narrow the server's `Capabilities` to only what the module declares.
@@ -131,13 +142,7 @@ fn module_scoped_capabilities(
 		FunctionTargets::All => {}
 	}
 
-	let net_targets = module_allow_net_targets(module);
-	let network = if net_targets.is_empty() {
-		Targets::None
-	} else {
-		Targets::Some(net_targets)
-	};
-	caps.with_network_targets(network)
+	caps.with_network_targets(module_net_targets(module))
 }
 
 #[async_trait]
@@ -317,4 +322,43 @@ fn parse_semver(version: &str) -> Result<(u32, u32, u32)> {
 	let patch = u32::try_from(v.patch)
 		.map_err(|_| anyhow::anyhow!("semver patch component too large: {}", v.patch))?;
 	Ok((major, minor, patch))
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn module_net_targets_all_for_star() {
+		let module = SurrealismCapabilities {
+			allow_net: NetTargets::All,
+			..Default::default()
+		};
+		assert!(matches!(module_net_targets(&module), Targets::All));
+	}
+
+	#[test]
+	fn module_net_targets_none_by_default() {
+		let module = SurrealismCapabilities::default();
+		assert!(matches!(module_net_targets(&module), Targets::None));
+	}
+
+	#[test]
+	fn module_scoped_capabilities_net_all_for_star() {
+		let server = Capabilities::default().with_network_targets(Targets::<NetTarget>::All);
+		let module = SurrealismCapabilities {
+			allow_net: NetTargets::All,
+			..Default::default()
+		};
+		let scoped = module_scoped_capabilities(&server, &module);
+		assert!(scoped.allows_network_target(&NetTarget::from_str("example.com").unwrap()));
+	}
+
+	#[test]
+	fn module_scoped_capabilities_net_none_denies_all() {
+		let server = Capabilities::default().with_network_targets(Targets::<NetTarget>::All);
+		let module = SurrealismCapabilities::default();
+		let scoped = module_scoped_capabilities(&server, &module);
+		assert!(!scoped.allows_network_target(&NetTarget::from_str("example.com").unwrap()));
+	}
 }

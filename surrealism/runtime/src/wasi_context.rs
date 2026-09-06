@@ -13,7 +13,7 @@ use wasmtime_wasi::cli::{IsTerminal, StdoutStream};
 use wasmtime_wasi::sockets::SocketAddrUse;
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder};
 
-use crate::net_allow::ResolvedNetAllow;
+use crate::net_allow::ResolvedAllowNet;
 
 /// Shared swappable callback for forwarding WASI stdio output.
 ///
@@ -113,7 +113,7 @@ impl AsyncWrite for CallbackWriter {
 
 pub fn build(
 	fs_root: Option<&Path>,
-	allow_net: Arc<Vec<ResolvedNetAllow>>,
+	allow_net: Arc<ResolvedAllowNet>,
 	stdout_cb: StdioCallback,
 	stderr_cb: StdioCallback,
 ) -> Result<(WasiCtx, ResourceTable)> {
@@ -125,14 +125,19 @@ pub fn build(
 		callback: stderr_cb,
 	});
 
-	if allow_net.is_empty() {
+	if matches!(*allow_net, ResolvedAllowNet::None) {
 		builder.allow_tcp(false);
 		builder.allow_udp(false);
 		builder.allow_ip_name_lookup(false);
 	} else {
-		// Hostnames are resolved at module load in `net_allow`, so guests
-		// don't need runtime DNS. Disabling it prevents DNS tunneling.
-		builder.allow_ip_name_lookup(false);
+		// `Some(..)` hostnames are resolved at module load in `net_allow`, so
+		// guests don't need runtime DNS there and it stays disabled to
+		// prevent DNS tunneling. `AllPublic` has no finite set of
+		// pre-resolved addresses to limit a scraper to, so name lookup is
+		// enabled — safely, because `socket_addr_check` below runs on the
+		// resolved connect address, not the name, so DNS rebinding cannot be
+		// used to reach a private address the guard would otherwise block.
+		builder.allow_ip_name_lookup(matches!(*allow_net, ResolvedAllowNet::AllPublic));
 		let filters = allow_net;
 		builder.socket_addr_check(move |addr, reason| {
 			let is_outbound = matches!(
@@ -141,7 +146,7 @@ pub fn build(
 					| SocketAddrUse::UdpConnect
 					| SocketAddrUse::UdpOutgoingDatagram
 			);
-			let allowed = is_outbound && filters.iter().any(|f| f.matches_socket_addr(&addr));
+			let allowed = is_outbound && filters.matches_socket_addr(&addr);
 			Box::pin(async move { allowed })
 		});
 	}

@@ -37,6 +37,13 @@ use crate::dbs::capabilities::{NetTarget, Targets};
 pub(crate) struct NetFilter {
 	pub(crate) allow: Targets<NetTarget>,
 	pub(crate) deny: Targets<NetTarget>,
+	/// Whether an allow-listed hostname resolving to a private/special-use IP
+	/// (loopback, RFC1918, link-local, cloud metadata, ...) should be let
+	/// through anyway. `true` for the operator's own `--allow-net all`
+	/// (`Targets::All` is an explicit "trust me"); kept `false` for a
+	/// Surrealism module's `allow_net = ["*"]`, since that grants third-party
+	/// code reach to any *public* host, not the server's internal network.
+	pub(crate) permit_private_ips: bool,
 }
 
 /// Returns `true` for IP addresses that belong to private, loopback, link-local,
@@ -61,6 +68,24 @@ fn is_private_ip(ip: IpAddr) -> bool {
 				// Link-local (fe80::/10)
 				|| (v6.segments()[0] & 0xFFC0) == 0xFE80
 		}
+	}
+}
+
+/// Whether `ip_target` is covered by a concrete, specific entry in `allow` —
+/// as opposed to merely matching because `allow` is `Targets::All`.
+///
+/// `Targets::All.matches(_)` is unconditionally `true`, so using it directly
+/// as the private-IP exemption would make *any* private address pass whenever
+/// `allow` is `Targets::All` — defeating `permit_private_ips = false` (used
+/// for a Surrealism module's `allow_net = ["*"]`, which must not grant reach
+/// into private ranges just because the allow set is unbounded). Only an
+/// explicit, bounded allow-list entry counts as "this address was actually
+/// vetted", so `Targets::All` (and `Targets::None`) are treated as covering
+/// no specific address here.
+fn ip_explicitly_allowed(allow: &Targets<NetTarget>, ip_target: &NetTarget) -> bool {
+	match allow {
+		Targets::Some(_) => allow.matches(ip_target),
+		Targets::None | Targets::All => false,
 	}
 }
 
@@ -117,13 +142,13 @@ impl Resolve for FilteringResolver {
 					if first_denied.is_none() {
 						first_denied = Some(target);
 					}
-				} else if !matches!(filter.allow, Targets::All)
+				} else if !filter.permit_private_ips
 					&& is_private_ip(addr.ip())
-					&& !filter.allow.matches(&ip_target)
+					&& !ip_explicitly_allowed(&filter.allow, &ip_target)
 				{
 					// A private/special IP that is not explicitly listed in the
 					// allow rules is blocked even when the originating hostname
-					// was allowed.  Skipped when `allow_net = all`.
+					// was allowed. Skipped when `permit_private_ips` is set.
 					if first_denied.is_none() {
 						first_denied = Some(target);
 					}
@@ -154,11 +179,26 @@ mod tests {
 	use super::{FilteringResolver, NetFilter, is_private_ip};
 	use crate::dbs::capabilities::{NetTarget, Targets};
 
-	/// Helper: create a `FilteringResolver` with the given allow/deny configuration.
+	/// Helper: create a `FilteringResolver` with the given allow/deny configuration,
+	/// with `permit_private_ips` following the server's own semantics (lifted only
+	/// under an explicit `allow_net = all`).
 	fn make_resolver(allow: Targets<NetTarget>, deny: Targets<NetTarget>) -> FilteringResolver {
+		let permit_private_ips = matches!(allow, Targets::All);
+		make_resolver_with_guard(allow, deny, permit_private_ips)
+	}
+
+	/// Helper: create a `FilteringResolver` with an explicit `permit_private_ips`,
+	/// for cases (like a Surrealism module's `allow_net = ["*"]`) where the guard
+	/// must stay on even though `allow` is `Targets::All`.
+	fn make_resolver_with_guard(
+		allow: Targets<NetTarget>,
+		deny: Targets<NetTarget>,
+		permit_private_ips: bool,
+	) -> FilteringResolver {
 		FilteringResolver::from_net_filter(Arc::new(NetFilter {
 			allow,
 			deny,
+			permit_private_ips,
 		}))
 	}
 
@@ -196,6 +236,21 @@ mod tests {
 		let name = Name::from_str("localhost").unwrap();
 		let result = resolver.resolve(name).await;
 		assert!(result.is_ok(), "Expected resolution to succeed with allow_net = all");
+	}
+
+	/// Verifies that even with `allow = Targets::All`, resolution to a private IP
+	/// is blocked when `permit_private_ips` is `false` — the case for a
+	/// Surrealism module's `allow_net = ["*"]`, which must not inherit the
+	/// operator's `--allow-net all` bypass of the private-IP guard.
+	#[tokio::test]
+	async fn test_filtering_resolver_private_ip_blocked_for_module_wildcard() {
+		let resolver = make_resolver_with_guard(Targets::All, Targets::None, false);
+		let name = Name::from_str("localhost").unwrap();
+		let result = resolver.resolve(name).await;
+		assert!(
+			result.is_err(),
+			"Expected private IP to be blocked for a module `*` client (permit_private_ips = false)"
+		);
 	}
 
 	#[test]

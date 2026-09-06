@@ -59,7 +59,7 @@ use crate::epoch::{self, EngineHandle};
 use crate::exports::ExportsManifest;
 use crate::host::{InvocationContext, implement_host_functions};
 use crate::kv::BTreeMapStore;
-use crate::net_allow::{ResolvedNetAllow, resolve_allow_net};
+use crate::net_allow::{ResolvedAllowNet, resolve_allow_net};
 use crate::package::{AttachedFs, SurrealismPackage};
 use crate::store::StoreData;
 
@@ -95,7 +95,7 @@ pub struct Runtime {
 	/// Combined with context timeout and server cap at invoke time.
 	module_execution_time: Option<Duration>,
 	/// `allow_net` resolved once at load (DNS, etc.); shared by WASI and core capabilities.
-	resolved_allow_net: Arc<Vec<ResolvedNetAllow>>,
+	resolved_allow_net: Arc<ResolvedAllowNet>,
 }
 
 impl fmt::Debug for Runtime {
@@ -238,7 +238,7 @@ impl Runtime {
 	}
 
 	/// Resolved `allow_net` from module load (same snapshot used for WASI socket filtering).
-	pub fn resolved_allow_net(&self) -> Arc<Vec<ResolvedNetAllow>> {
+	pub fn resolved_allow_net(&self) -> Arc<ResolvedAllowNet> {
 		Arc::clone(&self.resolved_allow_net)
 	}
 

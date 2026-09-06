@@ -10,7 +10,7 @@ use jsonwebtoken::{DecodingKey, Validation};
 use reqwest::{Client, Url};
 use sha2::{Digest, Sha256};
 
-use crate::dbs::capabilities::NetTarget;
+use crate::dbs::capabilities::{NetTarget, Targets};
 use crate::err::Error;
 use crate::kvs::Datastore;
 use crate::kvs::cache::ds::{CachedJwks, DatastoreCache, Entry, Lookup};
@@ -319,9 +319,11 @@ fn build_jwks_client(kvs: &Datastore) -> Result<Client> {
 
 	// Build the DNS-level filter from the same capability snapshot before the
 	// `capabilities` handle is moved into the redirect policy closure below.
+	let permit_private_ips = matches!(capabilities.allow_net, Targets::All);
 	let filter = Arc::new(NetFilter {
 		allow: capabilities.allow_net.clone(),
 		deny: capabilities.deny_net.clone(),
+		permit_private_ips,
 	});
 
 	let policy = Policy::custom(move |attempt| {

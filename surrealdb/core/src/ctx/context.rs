@@ -1316,7 +1316,7 @@ impl Context {
 
 				#[cfg(feature = "http")]
 				let module_net_targets =
-					crate::surrealism::host::module_allow_net_targets(&package.config.capabilities);
+					crate::surrealism::host::module_net_targets(&package.config.capabilities);
 
 				let runtime = tokio::task::spawn_blocking(move || {
 					Runtime::new(
@@ -1335,21 +1335,29 @@ impl Context {
 				let module_display_name: Arc<str> = format!("{org}::{name}").into();
 
 				#[cfg(feature = "http")]
-				let client = if module_net_targets.is_empty() {
-					Arc::new(
+				let client = match module_net_targets {
+					Targets::None => Arc::new(
 						HttpClient::new(Targets::None, Targets::All, &config)
 							.context("Failed to create http client for WASM module")?,
-					)
-				} else {
-					let allow = Targets::Some(module_net_targets);
-					Arc::new(
+					),
+					Targets::All => Arc::new(
+						// A module's `*` must not inherit the operator's
+						// `--allow-net all` bypass of the private-IP guard.
+						HttpClient::new_for_module_wildcard(
+							Targets::All,
+							self.capabilities.denied_network_targets_ref().clone(),
+							&config,
+						)
+						.context("Failed to create http client for WASM module")?,
+					),
+					allow @ Targets::Some(_) => Arc::new(
 						HttpClient::new(
 							allow,
 							self.capabilities.denied_network_targets_ref().clone(),
 							&config,
 						)
 						.context("Failed to create http client for WASM module")?,
-					)
+					),
 				};
 
 				Ok(SurrealismCachedModule {

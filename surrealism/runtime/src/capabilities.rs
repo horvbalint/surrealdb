@@ -26,8 +26,17 @@ pub struct SurrealismCapabilities {
 	#[serde(default)]
 	pub allow_functions: FunctionTargets,
 	/// Network targets the module is allowed to connect to.
+	///
+	/// - Omitted / empty array: **deny all** networking (default).
+	/// - `["*"]`: allow any **public** host. This does not lift the private-IP guard — loopback,
+	///   RFC1918, link-local, and other special-use ranges (including the cloud metadata endpoint)
+	///   stay blocked even under `"*"`. A module that also needs one of those must list it
+	///   explicitly.
+	/// - `["example.com", "10.0.0.0/8"]`: allow specific hosts, IPs, or CIDR blocks. Same entry
+	///   syntax as the server's `--allow-net` targets: `<host>[:<port>]` or
+	///   `<ipv4|ipv6>[/<mask>]`.
 	#[serde(default)]
-	pub allow_net: Vec<String>,
+	pub allow_net: NetTargets,
 	/// Maximum WASM linear memory in bytes. `None` means wasmtime default.
 	#[serde(default)]
 	pub max_memory_bytes: Option<usize>,
@@ -77,7 +86,7 @@ impl Default for SurrealismCapabilities {
 			allow_scripting: false,
 			allow_arbitrary_queries: false,
 			allow_functions: FunctionTargets::default(),
-			allow_net: Vec::new(),
+			allow_net: NetTargets::default(),
 			max_memory_bytes: None,
 			max_execution_time: None,
 			max_pool_size: None,
@@ -157,6 +166,50 @@ impl<'de> Deserialize<'de> for FunctionTargets {
 		}
 		if entries.len() == 1 && entries[0] == "*" {
 			return Ok(Self::All);
+		}
+		if entries.iter().any(|e| e == "*") {
+			return Ok(Self::All);
+		}
+		Ok(Self::Some(entries))
+	}
+}
+
+/// Network allowlist for a Surrealism module.
+///
+/// Default is `None` (deny all). Entries are plain strings — the same
+/// `<host>[:<port>]` / `<ipv4|ipv6>[/<mask>]` syntax as the server's
+/// `--allow-net` targets — parsed and validated against the server's own
+/// network capabilities when the module is loaded.
+#[derive(Debug, Default, Clone)]
+pub enum NetTargets {
+	/// Deny all networking (default when omitted or empty).
+	#[default]
+	None,
+	/// Allow any public host (`["*"]` in config). Does not lift the
+	/// private-IP guard.
+	All,
+	/// Allow specific hosts, IPs, or CIDR blocks.
+	Some(Vec<String>),
+}
+
+impl Serialize for NetTargets {
+	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		match self {
+			Self::None => {
+				let empty: Vec<String> = Vec::new();
+				empty.serialize(serializer)
+			}
+			Self::All => vec!["*".to_string()].serialize(serializer),
+			Self::Some(entries) => entries.serialize(serializer),
+		}
+	}
+}
+
+impl<'de> Deserialize<'de> for NetTargets {
+	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		let entries: Vec<String> = Vec::deserialize(deserializer)?;
+		if entries.is_empty() {
+			return Ok(Self::None);
 		}
 		if entries.iter().any(|e| e == "*") {
 			return Ok(Self::All);
@@ -314,6 +367,115 @@ allow_scripting = false
 		assert!(deserialized.targets.allows("http::get"));
 		assert!(deserialized.targets.allows("fn::check"));
 		assert!(!deserialized.targets.allows("string::len"));
+	}
+
+	#[test]
+	fn net_targets_serde_empty_is_none() {
+		let toml_str = r#"
+[capabilities]
+allow_net = []
+"#;
+		#[derive(Deserialize)]
+		struct Wrapper {
+			capabilities: SurrealismCapabilities,
+		}
+		let w: Wrapper = toml::from_str(toml_str).unwrap();
+		assert!(matches!(w.capabilities.allow_net, NetTargets::None));
+	}
+
+	#[test]
+	fn net_targets_serde_omitted_is_none() {
+		let toml_str = r#"
+[capabilities]
+allow_scripting = false
+"#;
+		#[derive(Deserialize)]
+		struct Wrapper {
+			capabilities: SurrealismCapabilities,
+		}
+		let w: Wrapper = toml::from_str(toml_str).unwrap();
+		assert!(matches!(w.capabilities.allow_net, NetTargets::None));
+	}
+
+	#[test]
+	fn net_targets_serde_star_is_all() {
+		let toml_str = r#"
+[capabilities]
+allow_net = ["*"]
+"#;
+		#[derive(Deserialize)]
+		struct Wrapper {
+			capabilities: SurrealismCapabilities,
+		}
+		let w: Wrapper = toml::from_str(toml_str).unwrap();
+		assert!(matches!(w.capabilities.allow_net, NetTargets::All));
+	}
+
+	#[test]
+	fn net_targets_serde_star_with_others_is_all() {
+		let toml_str = r#"
+[capabilities]
+allow_net = ["*", "example.com"]
+"#;
+		#[derive(Deserialize)]
+		struct Wrapper {
+			capabilities: SurrealismCapabilities,
+		}
+		let w: Wrapper = toml::from_str(toml_str).unwrap();
+		assert!(matches!(w.capabilities.allow_net, NetTargets::All));
+	}
+
+	#[test]
+	fn net_targets_serde_patterns() {
+		let toml_str = r#"
+[capabilities]
+allow_net = ["example.com", "10.0.0.0/8"]
+"#;
+		#[derive(Deserialize)]
+		struct Wrapper {
+			capabilities: SurrealismCapabilities,
+		}
+		let w: Wrapper = toml::from_str(toml_str).unwrap();
+		match w.capabilities.allow_net {
+			NetTargets::Some(entries) => {
+				assert_eq!(entries, vec!["example.com".to_string(), "10.0.0.0/8".to_string()]);
+			}
+			other => panic!("expected NetTargets::Some, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn net_targets_roundtrip_all() {
+		#[derive(Serialize, Deserialize)]
+		struct Wrapper {
+			targets: NetTargets,
+		}
+		let wrapper = Wrapper {
+			targets: NetTargets::All,
+		};
+		let serialized = toml::to_string(&wrapper).unwrap();
+		assert!(serialized.contains('*'));
+		let deserialized: Wrapper = toml::from_str(&serialized).unwrap();
+		assert!(matches!(deserialized.targets, NetTargets::All));
+	}
+
+	#[test]
+	fn net_targets_roundtrip_some() {
+		#[derive(Serialize, Deserialize)]
+		struct Wrapper {
+			targets: NetTargets,
+		}
+		let wrapper = Wrapper {
+			targets: NetTargets::Some(vec!["example.com".into(), "10.0.0.0/8".into()]),
+		};
+		let serialized = toml::to_string(&wrapper).unwrap();
+		let deserialized: Wrapper = toml::from_str(&serialized).unwrap();
+		match deserialized.targets {
+			NetTargets::Some(entries) => {
+				assert_eq!(entries, vec!["example.com".to_string(), "10.0.0.0/8".to_string()]);
+			}
+			other => panic!("expected NetTargets::Some, got {other:?}"),
+		}
 	}
 
 	#[test]

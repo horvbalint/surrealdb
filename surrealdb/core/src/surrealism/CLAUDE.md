@@ -21,6 +21,8 @@ Implements `surrealism_runtime::host::InvocationContext` for use inside SurrealD
 
 **Capability scoping:** Both `sql()` and `run()` create a derived `Context` whose `Capabilities` are narrowed to the module's declared permissions via `module_scoped_capabilities()`. This ensures a module cannot exceed its declared `allow_scripting`, `allow_functions`, or `allow_net` even if the server is more permissive. The server's deny-lists are always preserved.
 
+**`allow_net = ["*"]`:** `module_net_targets()` maps `NetTargets::All` to `Targets::All` for host-function calls, and the module's HTTP client is built via `HttpClient::new_for_module_wildcard` (`ctx/context.rs`), which forces the private-IP guard on even though `allow` is `Targets::All` — a module's `*` means any *public* host, not the same "trust me" as the operator's own `--allow-net all`. `validate_surrealism_capabilities` rejects a module requesting `*` unless the server itself allows all network targets.
+
 ### `SurrealismCache` (`cache.rs`)
 
 Caches compiled `Runtime` instances using `quick_cache`. Key variants:

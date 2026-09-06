@@ -13,6 +13,7 @@ mod surrealism_integration {
 	use std::time::Duration;
 
 	use serde::Deserialize;
+	use surrealism_runtime::capabilities::NetTargets;
 	use surrealism_runtime::config::{
 		AbiVersion, SurrealismAttach, SurrealismConfig, SurrealismMeta, Target,
 	};
@@ -1046,6 +1047,135 @@ mod surrealism_integration {
 	#[test(tokio::test)]
 	async fn module_fetch_pokemon() -> Result<(), Box<dyn std::error::Error>> {
 		check_fetch_pokemon(&DEMO_DIR.canonical).await
+	}
+
+	// -------------------------------------------------------------------
+	// `allow_net = ["*"]` tests
+	// -------------------------------------------------------------------
+
+	/// A variant of the demo module that declares `allow_net = ["*"]` instead
+	/// of the demo's `["127.0.0.1"]`. Repacks the already-compiled WASM from
+	/// `DEMO_DIR` rather than recompiling, since only the manifest capability
+	/// differs.
+	struct WildcardNetDemoDir {
+		_tmp: tempfile::TempDir,
+		canonical: PathBuf,
+	}
+
+	fn build_wildcard_net_demo_dir() -> WildcardNetDemoDir {
+		let tmp = tempfile::TempDir::new()
+			.expect("Failed to create temp dir for wildcard-net demo module");
+		let canonical =
+			std::fs::canonicalize(tmp.path()).expect("Failed to canonicalize temp dir path");
+
+		let source = DEMO_DIR.canonical.join("demo.surli");
+		let mut package = SurrealismPackage::from_file(source)
+			.expect("Failed to load demo.surli to build wildcard-net variant");
+		package.config.capabilities.allow_net = NetTargets::All;
+
+		let output = canonical.join("demo.surli");
+		let fs_dir = package.fs.as_ref().map(|fs| fs.path().to_path_buf());
+		package.pack(output, fs_dir.as_deref()).expect("Failed to repack wildcard-net demo module");
+
+		WildcardNetDemoDir {
+			_tmp: tmp,
+			canonical,
+		}
+	}
+
+	static WILDCARD_NET_DEMO_DIR: LazyLock<WildcardNetDemoDir> =
+		LazyLock::new(build_wildcard_net_demo_dir);
+
+	/// Like `start_surrealism_server`, but allows all outbound network
+	/// targets (`--allow-net` with no value), so a module declaring
+	/// `allow_net = ["*"]` is permitted to load.
+	async fn start_surrealism_server_allow_all_net(
+		bucket_dir: &Path,
+	) -> Result<(String, common::Child), Box<dyn std::error::Error>> {
+		let mut vars = HashMap::new();
+		vars.insert(
+			"SURREAL_BUCKET_FOLDER_ALLOWLIST".to_string(),
+			bucket_dir.to_string_lossy().to_string(),
+		);
+
+		common::start_server(common::StartServerArguments {
+			args: "--allow-experimental files,surrealism --allow-net".to_string(),
+			vars: Some(vars),
+			..Default::default()
+		})
+		.await
+	}
+
+	/// A module declaring `allow_net = ["*"]` must still be blocked from
+	/// reaching loopback: unlike the operator's own `--allow-net all`, a
+	/// module's wildcard does not lift the private-IP guard.
+	async fn check_fetch_pokemon_wildcard_blocks_loopback(
+		bucket_dir: &Path,
+	) -> Result<(), Box<dyn std::error::Error>> {
+		let api = LocalPokemonApi::start()?;
+		let api_base = api.base_url();
+		let (addr, _server) = start_surrealism_server_allow_all_net(bucket_dir).await?;
+		let ns = Ulid::new().to_string();
+		let db = Ulid::new().to_string();
+
+		setup_module(&addr, &ns, &db, bucket_dir).await;
+
+		let results = sql_query(
+			&addr,
+			&ns,
+			&db,
+			&format!("RETURN mod::demo::fetch_pokemon('{api_base}', 'pikachu');"),
+		)
+		.await;
+		assert_eq!(
+			results[0].status, "ERR",
+			"Expected loopback to be blocked for a module `allow_net = [\"*\"]` client, got: {:?}",
+			results[0].result
+		);
+
+		Ok(())
+	}
+
+	#[test(tokio::test)]
+	async fn module_fetch_pokemon_wildcard_blocks_loopback()
+	-> Result<(), Box<dyn std::error::Error>> {
+		check_fetch_pokemon_wildcard_blocks_loopback(&WILDCARD_NET_DEMO_DIR.canonical).await
+	}
+
+	/// A module declaring `allow_net = ["*"]` must fail to load on a server
+	/// that does not itself allow all network targets.
+	async fn check_load_rejects_wildcard_when_server_restricts_net(
+		bucket_dir: &Path,
+	) -> Result<(), Box<dyn std::error::Error>> {
+		// Default `start_surrealism_server` only allows 127.0.0.1.
+		let (addr, _server) = start_surrealism_server(bucket_dir).await?;
+		let ns = Ulid::new().to_string();
+		let db = Ulid::new().to_string();
+
+		setup_module(&addr, &ns, &db, bucket_dir).await;
+
+		// Any function call triggers module load and its capability check —
+		// no network function or live listener is needed to observe the failure.
+		let results = sql_query(&addr, &ns, &db, "RETURN mod::demo::can_drive(21);").await;
+		assert_eq!(
+			results[0].status, "ERR",
+			"Expected module load to fail: server does not allow all network targets, got: {:?}",
+			results[0].result
+		);
+		let message = results[0].result.as_str().unwrap_or_default();
+		assert!(
+			message.contains("network target"),
+			"Expected error to mention the rejected network capability, got: {message}"
+		);
+
+		Ok(())
+	}
+
+	#[test(tokio::test)]
+	async fn module_load_rejects_wildcard_when_server_restricts_net()
+	-> Result<(), Box<dyn std::error::Error>> {
+		check_load_rejects_wildcard_when_server_restricts_net(&WILDCARD_NET_DEMO_DIR.canonical)
+			.await
 	}
 
 	// -------------------------------------------------------------------

@@ -22,12 +22,50 @@ impl HttpClient {
 		Self::new_with_redirect_policy(allow, deny, config, |policy| policy.follow())
 	}
 
+	/// Like [`Self::new`], but never lifts the private-IP guard, even when
+	/// `allow` is `Targets::All`.
+	///
+	/// Used for Surrealism modules declaring `allow_net = ["*"]`: unlike the
+	/// operator's own `--allow-net all` (an explicit, first-party "trust me"),
+	/// `*` in a module manifest means "any public host" for third-party code,
+	/// not reach into the server's internal network (loopback, RFC1918,
+	/// link-local, cloud metadata, ...).
+	#[cfg(not(target_family = "wasm"))]
+	pub fn new_for_module_wildcard(
+		allow: Targets<NetTarget>,
+		deny: Targets<NetTarget>,
+		config: &CommonConfig,
+	) -> Result<Self> {
+		Self::new_with_redirect_policy_and_guard(
+			allow,
+			deny,
+			config,
+			|policy| policy.follow(),
+			false,
+		)
+	}
+
 	#[cfg(not(target_family = "wasm"))]
 	pub fn new_with_redirect_policy<F>(
 		allow: Targets<NetTarget>,
 		deny: Targets<NetTarget>,
 		config: &CommonConfig,
 		policy: F,
+	) -> Result<Self>
+	where
+		F: Fn(Attempt) -> Action + Send + Sync + 'static,
+	{
+		let permit_private_ips = matches!(allow, Targets::All);
+		Self::new_with_redirect_policy_and_guard(allow, deny, config, policy, permit_private_ips)
+	}
+
+	#[cfg(not(target_family = "wasm"))]
+	fn new_with_redirect_policy_and_guard<F>(
+		allow: Targets<NetTarget>,
+		deny: Targets<NetTarget>,
+		config: &CommonConfig,
+		policy: F,
+		permit_private_ips: bool,
 	) -> Result<Self>
 	where
 		F: Fn(Attempt) -> Action + Send + Sync + 'static,
@@ -46,6 +84,7 @@ impl HttpClient {
 		let filter = Arc::new(NetFilter {
 			allow,
 			deny,
+			permit_private_ips,
 		});
 
 		let filter_clone = Arc::clone(&filter);

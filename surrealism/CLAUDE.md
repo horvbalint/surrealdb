@@ -28,6 +28,7 @@ Archives are self-contained; load them via `SurrealismPackage::from_file(path)`.
 - **Capabilities-based:** Modules declare needs in `surrealism.toml` (`[capabilities]`). Server validates at load time and can further restrict.
 - **Runtime scoping:** When a module calls `sql()` or `run()`, the host creates a derived context whose capabilities are narrowed to the module's declared `allow_scripting`, `allow_functions`, and `allow_net`. Server deny-lists are always preserved.
 - **Deny-by-default for functions:** `allow_functions` defaults to empty (deny all). Use `["*"]` to allow all, or specific patterns like `["http::*", "fn::user_exists"]`.
+- **Deny-by-default for networking:** `allow_net` defaults to empty (deny all). Use `["*"]` to allow any *public* host — this does not lift the private-IP guard, so loopback, RFC1918, link-local, and the cloud metadata endpoint stay blocked even under `"*"`; list them explicitly if needed. Otherwise list specific hosts/IPs/CIDRs, e.g. `["example.com", "10.0.0.0/8"]`. A module requesting `["*"]` fails to load unless the server itself was started with `--allow-net` set to allow all.
 - **Module isolation:** Each module gets its own KV store; no cross-module access. WASM linear memory is per-instance.
 - **`strict_timeout = false`:** Disables epoch-based timeout enforcement entirely. The module can run indefinitely and monopolise a thread. Only trusted modules should set this. Future code-signing support will gate which modules may request it; until then the server operator accepts full responsibility.
 
